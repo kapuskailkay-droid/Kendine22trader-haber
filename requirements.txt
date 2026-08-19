@@ -1,6 +1,3 @@
-
-streamlit
-streamlit-autorefresh
-ccxt
-pandas
+feedparser
+deep_translator
 requests
