@@ -1,5 +1,6 @@
 import hashlib
 import time
+import urllib.parse
 import xml.etree.ElementTree as ET
 import ccxt
 import pandas as pd
@@ -14,7 +15,7 @@ GOMULU_TOPIC_ID = "3972"
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
-    page_title="KENDİNE22TRADER - Canlı Kripto Haber & Piyasa Radarı",
+    page_title="KENDİNE22TRADER - Türkçe Kripto Haber & Radar",
     layout="wide"
 )
 
@@ -47,14 +48,25 @@ min_artis_5m = st.sidebar.slider("5 Dakikalık Değişim Eşiği (%)", 0.8, 5.0,
 min_artis_15m = st.sidebar.slider("15 Dakikalık Değişim Eşiği (%)", 1.2, 8.0, 2.0, 0.1)
 min_artis_60m = st.sidebar.slider("60 Dakikalık Değişim Eşiği (%)", 2.0, 12.0, 3.0, 0.1)
 
-st.title("⚡ KENDİNE22TRADER - Canlı Kripto Haber & BTC/ETH Radarı")
+st.title("⚡ KENDİNE22TRADER - Canlı Türkçe Kripto Haber & BTC/ETH Radarı")
+
+# --- ANLIK TÜRKÇE ÇEVİRİ MOTORU ---
+def turkceye_cevir(metin):
+    if not metin or len(metin.strip()) == 0:
+        return metin
+    try:
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=tr&dt=t&q={urllib.parse.quote(metin)}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=4).json()
+        cevrilmis = "".join([cumle[0] for cumle in res[0] if cumle[0]])
+        return cevrilmis if cevrilmis else metin
+    except Exception:
+        return metin
 
 # --- TELEGRAM MESAJ GÖNDERİCİ (TOPIC 3972 KİLİTLİ) ---
 def telegram_mesaj_gonder(metin):
     if telegram_aktif and bot_token and chat_id:
         url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
-        
-        # Hedef Topic ID'yi doğrudan data payload içine yerleştiriyoruz
         hedef_topic = str(topic_id).strip() if (topic_id and str(topic_id).strip() != "") else GOMULU_TOPIC_ID
         
         data = {
@@ -74,11 +86,11 @@ def telegram_mesaj_gonder(metin):
         except Exception:
             pass
 
-# --- TÜM PİYASADAN CANLI HABER ÇEKİCİ (FİLTRESİZ TÜM GELİŞMELER) ---
+# --- TÜM PİYASADAN CANLI HABER ÇEKİCİ (OTOMATİK TÜRKÇE) ---
 def canli_kripto_haberleri_tara():
     haberler = []
     
-    # 1. Kaynak: Çoklu RSS Akışları (CoinTelegraph, CoinDesk, Decrypt, BitcoinMagazine, CryptoSlate)
+    # 1. Kaynak: RSS Akışları (CoinTelegraph, CoinDesk, Decrypt, CryptoSlate, Bitcoin Magazine)
     rss_kaynaklari = [
         {"ad": "CoinTelegraph", "url": "https://cointelegraph.com/rss"},
         {"ad": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
@@ -97,14 +109,12 @@ def canli_kripto_haberleri_tara():
                 for item in root.findall("./channel/item")[:5]:
                     title = item.find("title").text if item.find("title") is not None else ""
                     link = item.find("link").text if item.find("link") is not None else ""
-                    pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
                     
                     if title and link:
                         haberler.append({
                             "baslik": title.strip(),
                             "kaynak": kaynak["ad"],
-                            "link": link.strip(),
-                            "zaman": pub_date
+                            "link": link.strip()
                         })
         except Exception:
             pass
@@ -112,7 +122,7 @@ def canli_kripto_haberleri_tara():
     # 2. Kaynak: CryptoPanic Canlı Akış
     try:
         cp_res = requests.get("https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true", timeout=4).json()
-        for p in cp_res.get("results", [])[:10]:
+        for p in cp_res.get("results", [])[:8]:
             title = p.get("title", "")
             source_name = p.get("source", {}).get("title", "Kripto Gündem")
             url = p.get("url", "")
@@ -120,13 +130,12 @@ def canli_kripto_haberleri_tara():
                 haberler.append({
                     "baslik": title.strip(),
                     "kaynak": source_name,
-                    "link": url.strip(),
-                    "zaman": p.get("published_at", "")
+                    "link": url.strip()
                 })
     except Exception:
         pass
 
-    # Haberleri İşle ve Telegram'a Bildir
+    # Haberleri Çevir ve Telegram'a Bildir
     ekran_listesi = []
     for h in haberler:
         h_hash = hashlib.md5(h["baslik"].encode('utf-8')).hexdigest()
@@ -134,20 +143,30 @@ def canli_kripto_haberleri_tara():
         if h_hash not in st.session_state.gonderilen_haber_hashleri:
             st.session_state.gonderilen_haber_hashleri.add(h_hash)
             
-            # Telegram Mesajı
+            # Anlık Türkçe Çeviri Yapılıyor
+            turkce_baslik = turkceye_cevir(h["baslik"])
+            
+            # Telegram Mesaj Formatı
             tg_metin = (
-                f"📰 <b>KRİPTO PİYASASI CANLI AKIŞ</b>\n\n"
-                f"📌 <b>{h['baslik']}</b>\n\n"
+                f"📰 <b>SON DAKİKA KRİPTO HABERİ</b>\n\n"
+                f"🇹🇷 <b>{turkce_baslik}</b>\n\n"
+                f"🇬🇧 <i>{h['baslik']}</i>\n\n"
                 f"🌐 <b>Kaynak:</b> {h['kaynak']}\n"
                 f"🔗 <a href='{h['link']}'>Haberi & Detayları Oku ↗</a>"
             )
             telegram_mesaj_gonder(tg_metin)
             
-        ekran_listesi.append({
-            "Haber Başlığı": h["baslik"],
-            "Kaynak": h["kaynak"],
-            "Link": h["link"]
-        })
+            ekran_listesi.append({
+                "Haber Başlığı (Türkçe)": turkce_baslik,
+                "Kaynak": h["kaynak"],
+                "Link": h["link"]
+            })
+        else:
+            ekran_listesi.append({
+                "Haber Başlığı (Türkçe)": h["baslik"],
+                "Kaynak": h["kaynak"],
+                "Link": h["link"]
+            })
         
     return pd.DataFrame(ekran_listesi)
 
