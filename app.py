@@ -5,9 +5,10 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-# --- SABİT BOT VE TELEGRAM AYARLARI ---
+# --- SABİT BOT VE TELEGRAM AYARLARI (GÖMÜLÜ) ---
 GOMULU_BOT_TOKEN = "7820599329:AAEAa13edhS9PLoG1t8R34PLO9xpKlaT_Lc"
 GOMULU_CHAT_ID = "-1004434260285"
+GOMULU_TOPIC_ID = "3972"
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
@@ -26,7 +27,7 @@ st.sidebar.header("📱 Telegram Bildirim Ayarları")
 telegram_aktif = st.sidebar.checkbox("🚀 Telegram Bildirimleri Açık", value=True)
 bot_token = st.sidebar.text_input("Telegram Bot Token", value=GOMULU_BOT_TOKEN, type="password")
 chat_id = st.sidebar.text_input("Telegram Chat ID", value=GOMULU_CHAT_ID)
-topic_id = st.sidebar.text_input("Haber Sekmesi Topic ID", value="", help="Haberler için açtığınız sekmenin ID'si (Genel grupsa boş bırakın)")
+topic_id = st.sidebar.text_input("Haber Sekmesi Topic ID", value=GOMULU_TOPIC_ID)
 
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Canlı Takip & Alarm Ayarları")
@@ -82,14 +83,12 @@ def son_dakika_haberleri_tara():
             kaynak = post.get("source", {}).get("title", "Kripto Ajansı")
             url_link = post.get("url", "https://cryptopanic.com")
             
-            # Haber Filtresi
             onemli_kelimeler = ["FED", "POWELL", "RATE", "INFLATION", "CPI", "SEC", "ETF", "BREAKING", "URGENT", "BITCOIN", "ETHEREUM", "BINANCE", "WAR"]
             onemli_mi = any(k in title.upper() for k in onemli_kelimeler)
             
             if p_id not in st.session_state.son_haber_idleri:
                 st.session_state.son_haber_idleri.add(p_id)
                 
-                # Telegram'a Haber Gönder
                 if telegram_aktif:
                     etiket = "🚨 <b>SON DAKİKA GELİŞMESİ</b>" if onemli_mi else "📰 <b>KRİPTO HABERİ</b>"
                     msg = (
@@ -106,7 +105,7 @@ def son_dakika_haberleri_tara():
     
     return pd.DataFrame(haber_listesi)
 
-# --- BTC & ETH ANİ HAREKET DEDEKTÖRÜ (MİKABOT FORMATI) ---
+# --- BTC & ETH ANİ HAREKET DEDEKTÖRÜ ---
 def btc_eth_hareket_kontrol():
     mexc = ccxt.mexc({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
     takip_pariteleri = ['BTC/USDT', 'ETH/USDT']
