@@ -1,4 +1,6 @@
+import hashlib
 import time
+import xml.etree.ElementTree as ET
 import ccxt
 import pandas as pd
 import requests
@@ -12,12 +14,12 @@ GOMULU_TOPIC_ID = "3972"
 
 # --- SAYFA YAPILANDIRMASI ---
 st.set_page_config(
-    page_title="KENDİNE22TRADER - BTC/ETH & Haber Radarı",
+    page_title="KENDİNE22TRADER - Canlı Kripto Haber & Piyasa Radarı",
     layout="wide"
 )
 
-if "son_haber_idleri" not in st.session_state:
-    st.session_state.son_haber_idleri = set()
+if "gonderilen_haber_hashleri" not in st.session_state:
+    st.session_state.gonderilen_haber_hashleri = set()
 
 if "son_fiyat_hafizasi" not in st.session_state:
     st.session_state.son_fiyat_hafizasi = {}
@@ -33,79 +35,123 @@ st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Canlı Takip & Alarm Ayarları")
 
 oto_yenileme = st.sidebar.checkbox("🔄 Otomatik Canlı Takip Açık", value=True)
-yenileme_araligi = st.sidebar.selectbox("Kontrol Sıklığı", options=[15, 30, 60], index=0, format_func=lambda x: f"{x} Saniyede Bir")
+yenileme_araligi = st.sidebar.selectbox("Tarama Sıklığı", options=[10, 15, 30, 60], index=1, format_func=lambda x: f"{x} Saniyede Bir")
 
 if oto_yenileme:
-    st_autorefresh(interval=yenileme_araligi * 1000, key="haber_ve_fiyat_takip")
-    st.sidebar.success(f"🟢 Canlı mod aktif: Her {yenileme_araligi} sn")
+    st_autorefresh(interval=yenileme_araligi * 1000, key="canli_haber_ve_alarm")
+    st.sidebar.success(f"🟢 Canlı haber akışı aktif: Her {yenileme_araligi} sn")
 
 st.sidebar.markdown("---")
-st.sidebar.header("🎯 Ani Değişim Alarm Eşikleri")
+st.sidebar.header("🎯 BTC & ETH Ani Değişim Eşikleri")
+min_artis_5m = st.sidebar.slider("5 Dakikalık Değişim Eşiği (%)", 0.8, 5.0, 1.2, 0.1)
+min_artis_15m = st.sidebar.slider("15 Dakikalık Değişim Eşiği (%)", 1.2, 8.0, 2.0, 0.1)
+min_artis_60m = st.sidebar.slider("60 Dakikalık Değişim Eşiği (%)", 2.0, 12.0, 3.0, 0.1)
 
-min_artis_5m = st.sidebar.slider("5 Dakikalık Değişim Eşiği (%)", 1.0, 5.0, 1.5, 0.1)
-min_artis_15m = st.sidebar.slider("15 Dakikalık Değişim Eşiği (%)", 1.5, 8.0, 2.5, 0.1)
-min_artis_60m = st.sidebar.slider("60 Dakikalık Değişim Eşiği (%)", 2.5, 12.0, 3.5, 0.1)
+st.title("⚡ KENDİNE22TRADER - Canlı Kripto Haber & BTC/ETH Radarı")
 
-st.title("⚡ KENDİNE22TRADER - BTC/ETH Pump/Dump & FED Haber Radarı")
-
-# --- TELEGRAM MESAJ GÖNDERİCİ ---
+# --- TELEGRAM MESAJ GÖNDERİCİ (TOPIC 3972 KİLİTLİ) ---
 def telegram_mesaj_gonder(metin):
     if telegram_aktif and bot_token and chat_id:
         url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
-        params = {}
-        if topic_id and str(topic_id).strip() != "":
-            try:
-                params["message_thread_id"] = int(str(topic_id).strip())
-            except ValueError:
-                pass
+        
+        # Hedef Topic ID'yi doğrudan data payload içine yerleştiriyoruz
+        hedef_topic = str(topic_id).strip() if (topic_id and str(topic_id).strip() != "") else GOMULU_TOPIC_ID
+        
         data = {
             "chat_id": chat_id.strip(),
             "text": metin,
-            "parse_mode": "HTML"
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
         }
+        if hedef_topic:
+            try:
+                data["message_thread_id"] = int(hedef_topic)
+            except ValueError:
+                pass
+                
         try:
-            requests.post(url, params=params, data=data, timeout=8)
+            requests.post(url, data=data, timeout=8)
         except Exception:
             pass
 
-# --- KRİPTO & FED HABER AKIŞI MOTORU ---
-def son_dakika_haberleri_tara():
-    url = "https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true"
-    haber_listesi = []
+# --- TÜM PİYASADAN CANLI HABER ÇEKİCİ (FİLTRESİZ TÜM GELİŞMELER) ---
+def canli_kripto_haberleri_tara():
+    haberler = []
     
+    # 1. Kaynak: Çoklu RSS Akışları (CoinTelegraph, CoinDesk, Decrypt, BitcoinMagazine, CryptoSlate)
+    rss_kaynaklari = [
+        {"ad": "CoinTelegraph", "url": "https://cointelegraph.com/rss"},
+        {"ad": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+        {"ad": "Decrypt", "url": "https://decrypt.co/feed"},
+        {"ad": "CryptoSlate", "url": "https://cryptoslate.com/feed/"},
+        {"ad": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/feed"}
+    ]
+    
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
+    for kaynak in rss_kaynaklari:
+        try:
+            res = requests.get(kaynak["url"], headers=headers, timeout=4)
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+                for item in root.findall("./channel/item")[:5]:
+                    title = item.find("title").text if item.find("title") is not None else ""
+                    link = item.find("link").text if item.find("link") is not None else ""
+                    pub_date = item.find("pubDate").text if item.find("pubDate") is not None else ""
+                    
+                    if title and link:
+                        haberler.append({
+                            "baslik": title.strip(),
+                            "kaynak": kaynak["ad"],
+                            "link": link.strip(),
+                            "zaman": pub_date
+                        })
+        except Exception:
+            pass
+            
+    # 2. Kaynak: CryptoPanic Canlı Akış
     try:
-        res = requests.get(url, timeout=5).json()
-        posts = res.get("results", [])
-        
-        for post in posts[:15]:
-            p_id = str(post.get("id"))
-            title = post.get("title", "")
-            kaynak = post.get("source", {}).get("title", "Kripto Ajansı")
-            url_link = post.get("url", "https://cryptopanic.com")
-            
-            onemli_kelimeler = ["FED", "POWELL", "RATE", "INFLATION", "CPI", "SEC", "ETF", "BREAKING", "URGENT", "BITCOIN", "ETHEREUM", "BINANCE", "WAR"]
-            onemli_mi = any(k in title.upper() for k in onemli_kelimeler)
-            
-            if p_id not in st.session_state.son_haber_idleri:
-                st.session_state.son_haber_idleri.add(p_id)
-                
-                if telegram_aktif:
-                    etiket = "🚨 <b>SON DAKİKA GELİŞMESİ</b>" if onemli_mi else "📰 <b>KRİPTO HABERİ</b>"
-                    msg = (
-                        f"{etiket}\n\n"
-                        f"📌 <b>{title}</b>\n\n"
-                        f"🌐 <b>Kaynak:</b> {kaynak}\n"
-                        f"🔗 <a href='{url_link}'>Haberi Oku ↗</a>"
-                    )
-                    telegram_mesaj_gonder(msg)
-            
-            haber_listesi.append({"Başlık": title, "Kaynak": kaynak, "Link": url_link})
+        cp_res = requests.get("https://cryptopanic.com/api/v1/posts/?auth_token=free&public=true", timeout=4).json()
+        for p in cp_res.get("results", [])[:10]:
+            title = p.get("title", "")
+            source_name = p.get("source", {}).get("title", "Kripto Gündem")
+            url = p.get("url", "")
+            if title and url:
+                haberler.append({
+                    "baslik": title.strip(),
+                    "kaynak": source_name,
+                    "link": url.strip(),
+                    "zaman": p.get("published_at", "")
+                })
     except Exception:
         pass
-    
-    return pd.DataFrame(haber_listesi)
 
-# --- BTC & ETH ANİ HAREKET DEDEKTÖRÜ ---
+    # Haberleri İşle ve Telegram'a Bildir
+    ekran_listesi = []
+    for h in haberler:
+        h_hash = hashlib.md5(h["baslik"].encode('utf-8')).hexdigest()
+        
+        if h_hash not in st.session_state.gonderilen_haber_hashleri:
+            st.session_state.gonderilen_haber_hashleri.add(h_hash)
+            
+            # Telegram Mesajı
+            tg_metin = (
+                f"📰 <b>KRİPTO PİYASASI CANLI AKIŞ</b>\n\n"
+                f"📌 <b>{h['baslik']}</b>\n\n"
+                f"🌐 <b>Kaynak:</b> {h['kaynak']}\n"
+                f"🔗 <a href='{h['link']}'>Haberi & Detayları Oku ↗</a>"
+            )
+            telegram_mesaj_gonder(tg_metin)
+            
+        ekran_listesi.append({
+            "Haber Başlığı": h["baslik"],
+            "Kaynak": h["kaynak"],
+            "Link": h["link"]
+        })
+        
+    return pd.DataFrame(ekran_listesi)
+
+# --- BTC & ETH ANİ HAREKET DEDEKTÖRÜ (MİKABOT FORMATI) ---
 def btc_eth_hareket_kontrol():
     mexc = ccxt.mexc({'options': {'defaultType': 'swap'}, 'enableRateLimit': True})
     takip_pariteleri = ['BTC/USDT', 'ETH/USDT']
@@ -161,18 +207,24 @@ def btc_eth_hareket_kontrol():
     return pd.DataFrame(bildirimler)
 
 # --- ÇALIŞTIRMA VE EKRAN ---
-col_sol, col_sag = st.columns(2)
+col_haber, col_fiyat = st.columns([1.3, 0.7])
 
-with col_sol:
-    st.subheader("📈 BTC & ETH Ani Hareket Radarı")
+with col_haber:
+    st.subheader(f"📰 Kripto Piyasası Canlı Haber Akışı ({pd.Timestamp.now().strftime('%H:%M:%S')})")
+    df_haber = canli_kripto_haberleri_tara()
+    if not df_haber.empty:
+        st.dataframe(
+            df_haber,
+            column_config={"Link": st.column_config.LinkColumn("Haber Linki", display_text="Haberi Oku ↗")},
+            use_container_width=True
+        )
+    else:
+        st.info("Haber akışı taranıyor...")
+
+with col_fiyat:
+    st.subheader("⚡ BTC & ETH Hızlı Hareketler")
     df_fiyat = btc_eth_hareket_kontrol()
     if not df_fiyat.empty:
         st.dataframe(df_fiyat, use_container_width=True)
     else:
-        st.info("BTC ve ETH eşik değerlerin altında stabil seyrediyor.")
-
-with col_sag:
-    st.subheader("📰 Son Dakika Kripto & FED Haberleri")
-    df_haber = son_dakika_haberleri_tara()
-    if not df_haber.empty:
-        st.dataframe(df_haber, use_container_width=True)
+        st.info("BTC ve ETH belirlenen eşiklerin altında stabil seyrediyor.")
